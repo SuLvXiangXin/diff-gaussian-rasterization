@@ -401,18 +401,22 @@ __global__ void __launch_bounds__(BLOCK_X * BLOCK_Y)
 renderCUDA(
 	const uint2* __restrict__ ranges,
 	const uint32_t* __restrict__ point_list,
-	int W, int H,
+	int S, int W, int H,
 	const float* __restrict__ bg_color,
 	const float2* __restrict__ points_xy_image,
 	const float4* __restrict__ conic_opacity,
 	const float* __restrict__ colors,
+	const float* __restrict__ features,
 	const float* __restrict__ final_Ts,
-	const uint32_t* __restrict__ n_contrib,
+	const int32_t* __restrict__ n_contrib,
 	const float* __restrict__ dL_dpixels,
+	const float* __restrict__ dL_dpixels_f,
 	float3* __restrict__ dL_dmean2D,
 	float4* __restrict__ dL_dconic2D,
 	float* __restrict__ dL_dopacity,
-	float* __restrict__ dL_dcolors)
+	float* __restrict__ dL_dcolors,
+    float* __restrict__ dL_dfeature
+	)
 {
 	// We rasterize again. Compute necessary block info.
 	auto block = cg::this_thread_block();
@@ -435,6 +439,7 @@ renderCUDA(
 	__shared__ float2 collected_xy[BLOCK_SIZE];
 	__shared__ float4 collected_conic_opacity[BLOCK_SIZE];
 	__shared__ float collected_colors[C * BLOCK_SIZE];
+	__shared__ float collected_features[MAX_FEATURES * BLOCK_SIZE];
 
 	// In the forward, we stored the final value for T, the
 	// product of all (1 - alpha) factors. 
@@ -443,17 +448,22 @@ renderCUDA(
 
 	// We start from the back. The ID of the last contributing
 	// Gaussian is known from each pixel from the forward.
-	uint32_t contributor = toDo;
+	int32_t contributor = toDo;
 	const int last_contributor = inside ? n_contrib[pix_id] : 0;
 
 	float accum_rec[C] = { 0 };
+	float accum_rec_f[MAX_FEATURES] = { 0 };
 	float dL_dpixel[C];
-	if (inside)
+	float dL_dpixel_f[MAX_FEATURES];
+	if (inside){
 		for (int i = 0; i < C; i++)
 			dL_dpixel[i] = dL_dpixels[i * H * W + pix_id];
-
+		for (int i = 0; i < S; i++)
+            dL_dpixel_f[i] = dL_dpixels_f[i * H * W + pix_id];
+	}
 	float last_alpha = 0;
 	float last_color[C] = { 0 };
+	float last_feature[MAX_FEATURES] = { 0 };
 
 	// Gradient of pixel coordinate w.r.t. normalized 
 	// screen-space viewport corrdinates (-1 to 1)
@@ -475,6 +485,8 @@ renderCUDA(
 			collected_conic_opacity[block.thread_rank()] = conic_opacity[coll_id];
 			for (int i = 0; i < C; i++)
 				collected_colors[i * BLOCK_SIZE + block.thread_rank()] = colors[coll_id * C + i];
+			for (int i = 0; i < S; i++)
+                collected_features[i * BLOCK_SIZE + block.thread_rank()] = features[coll_id * S + i];
 		}
 		block.sync();
 
@@ -522,6 +534,17 @@ renderCUDA(
 				// many that were affected by this Gaussian.
 				atomicAdd(&(dL_dcolors[global_id * C + ch]), dchannel_dcolor * dL_dchannel);
 			}
+
+			// for feature
+            for (int ch = 0; ch < S; ch++)
+            {
+                const float feature = collected_features[ch * BLOCK_SIZE + j];
+                accum_rec_f[ch] = last_alpha * last_feature[ch] + (1.f - last_alpha) * accum_rec_f[ch];
+                last_feature[ch] = feature;
+                const float dL_dchannel_f = dL_dpixel_f[ch];
+				dL_dalpha += (feature - accum_rec_f[ch]) * dL_dchannel_f;
+                atomicAdd(&(dL_dfeature[global_id * S + ch]), dchannel_dcolor * dL_dchannel_f);
+            }
 			dL_dalpha *= T;
 			// Update last alpha (to be used in the next iteration)
 			last_alpha = alpha;
@@ -625,33 +648,40 @@ void BACKWARD::render(
 	const dim3 grid, const dim3 block,
 	const uint2* ranges,
 	const uint32_t* point_list,
-	int W, int H,
+	int S, int W, int H,
 	const float* bg_color,
 	const float2* means2D,
 	const float4* conic_opacity,
 	const float* colors,
+	const float* features,
 	const float* final_Ts,
-	const uint32_t* n_contrib,
+	const int32_t* n_contrib,
 	const float* dL_dpixels,
+	const float* dL_dfeatures,
 	float3* dL_dmean2D,
 	float4* dL_dconic2D,
 	float* dL_dopacity,
-	float* dL_dcolors)
+	float* dL_dcolors,
+    float* dL_dfeature
+	)
 {
 	renderCUDA<NUM_CHANNELS> << <grid, block >> >(
 		ranges,
 		point_list,
-		W, H,
+		S, W, H,
 		bg_color,
 		means2D,
 		conic_opacity,
 		colors,
+		features,
 		final_Ts,
 		n_contrib,
 		dL_dpixels,
+		dL_dfeatures,
 		dL_dmean2D,
 		dL_dconic2D,
 		dL_dopacity,
-		dL_dcolors
+		dL_dcolors,
+		dL_dfeature
 		);
 }

@@ -162,6 +162,7 @@ __global__ void preprocessCUDA(int P, int D, int M,
 	const float* shs,
 	bool* clamped,
 	const float* cov3D_precomp,
+	const bool* mask,
 	const float* colors_precomp,
 	const float* viewmatrix,
 	const float* projmatrix,
@@ -190,7 +191,7 @@ __global__ void preprocessCUDA(int P, int D, int M,
 
 	// Perform near culling, quit if outside.
 	float3 p_view;
-	if (!in_frustum(idx, orig_points, viewmatrix, projmatrix, prefiltered, p_view))
+	if (!(mask[idx]) || !in_frustum(idx, orig_points, viewmatrix, projmatrix, prefiltered, p_view))
 		return;
 
 	// Transform point by projecting
@@ -263,14 +264,16 @@ __global__ void __launch_bounds__(BLOCK_X * BLOCK_Y)
 renderCUDA(
 	const uint2* __restrict__ ranges,
 	const uint32_t* __restrict__ point_list,
-	int W, int H,
+	const int S, int W, int H,
 	const float2* __restrict__ points_xy_image,
+	const float* __restrict__ colors,
 	const float* __restrict__ features,
 	const float4* __restrict__ conic_opacity,
 	float* __restrict__ final_T,
-	uint32_t* __restrict__ n_contrib,
+	int32_t* __restrict__ n_contrib,
 	const float* __restrict__ bg_color,
-	float* __restrict__ out_color)
+	float* __restrict__ out_color,
+	float* __restrict__ out_feature)
 {
 	// Identify current tile and associated min/max pixel range.
 	auto block = cg::this_thread_block();
@@ -298,9 +301,9 @@ renderCUDA(
 
 	// Initialize helper variables
 	float T = 1.0f;
-	uint32_t contributor = 0;
-	uint32_t last_contributor = 0;
-	float C[CHANNELS] = { 0 };
+	int32_t contributor = 0;
+	int32_t last_contributor = 0;
+	float C[CHANNELS] = { 0 }, F[MAX_FEATURES] = { 0 };
 
 	// Iterate over batches until all done or range is complete
 	for (int i = 0; i < rounds; i++, toDo -= BLOCK_SIZE)
@@ -350,9 +353,13 @@ renderCUDA(
 				continue;
 			}
 
+            float weight = alpha * T;
 			// Eq. (3) from 3D Gaussian splatting paper.
 			for (int ch = 0; ch < CHANNELS; ch++)
-				C[ch] += features[collected_id[j] * CHANNELS + ch] * alpha * T;
+				C[ch] += colors[collected_id[j] * CHANNELS + ch] * weight;
+
+			for (int ch = 0; ch < S; ch++)
+				F[ch] += features[collected_id[j] * S + ch] * weight;
 
 			T = test_T;
 
@@ -370,6 +377,8 @@ renderCUDA(
 		n_contrib[pix_id] = last_contributor;
 		for (int ch = 0; ch < CHANNELS; ch++)
 			out_color[ch * H * W + pix_id] = C[ch] + T * bg_color[ch];
+		for (int ch = 0; ch < S; ch++)
+			out_feature[ch * H * W + pix_id] = F[ch];
 	}
 }
 
@@ -377,26 +386,31 @@ void FORWARD::render(
 	const dim3 grid, dim3 block,
 	const uint2* ranges,
 	const uint32_t* point_list,
-	int W, int H,
+	const int S, int W, int H,
 	const float2* means2D,
 	const float* colors,
+	const float* features,
 	const float4* conic_opacity,
 	float* final_T,
-	uint32_t* n_contrib,
+	int32_t* n_contrib,
 	const float* bg_color,
-	float* out_color)
+	float* out_color,
+	float* out_feature
+	)
 {
 	renderCUDA<NUM_CHANNELS> << <grid, block >> > (
 		ranges,
 		point_list,
-		W, H,
+		S, W, H,
 		means2D,
 		colors,
+		features,
 		conic_opacity,
 		final_T,
 		n_contrib,
 		bg_color,
-		out_color);
+		out_color,
+		out_feature);
 }
 
 void FORWARD::preprocess(int P, int D, int M,
@@ -408,6 +422,7 @@ void FORWARD::preprocess(int P, int D, int M,
 	const float* shs,
 	bool* clamped,
 	const float* cov3D_precomp,
+	const bool* mask,
 	const float* colors_precomp,
 	const float* viewmatrix,
 	const float* projmatrix,
@@ -435,6 +450,7 @@ void FORWARD::preprocess(int P, int D, int M,
 		shs,
 		clamped,
 		cov3D_precomp,
+		mask,
 		colors_precomp,
 		viewmatrix, 
 		projmatrix,
