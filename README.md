@@ -20,6 +20,7 @@ contrib, rendered_image, rendered_feature, radii = rasterizer(
     means2D=means2D,
     shs=shs,
     colors_precomp=colors_precomp,
+    features=features,
     opacities=opacity,
     scales=scales,
     rotations=rotations,
