@@ -11,7 +11,7 @@ depth = (xyz_homo @ viewpoint_camera.world_view_transform[:, 2:3])
 features = torch.cat([
   others, 
   depth,
-  torch.ones_like(masked_depth),
+  torch.ones_like(depth),
 ], dim=1)
 
 # contrib is the contributor map [1, H, W]
